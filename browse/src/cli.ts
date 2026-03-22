@@ -83,6 +83,7 @@ interface ServerState {
   startedAt: string;
   serverPath: string;
   binaryVersion?: string;
+  profile?: string;
 }
 
 // ─── State File ────────────────────────────────────────────────
@@ -161,7 +162,7 @@ function cleanupLegacyState(): void {
 }
 
 // ─── Server Lifecycle ──────────────────────────────────────────
-async function startServer(): Promise<ServerState> {
+async function startServer(profileName?: string): Promise<ServerState> {
   ensureStateDir(config);
 
   // Clean up stale state file
@@ -174,9 +175,11 @@ async function startServer(): Promise<ServerState> {
   const serverCmd = useNode
     ? ['node', NODE_SERVER_SCRIPT]
     : ['bun', 'run', SERVER_SCRIPT];
+  const spawnEnv: Record<string, string> = { ...process.env as Record<string, string>, BROWSE_STATE_FILE: config.stateFile };
+  if (profileName) spawnEnv.BROWSE_PROFILE = profileName;
   const proc = Bun.spawn(serverCmd, {
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, BROWSE_STATE_FILE: config.stateFile },
+    env: spawnEnv,
   });
 
   // Don't hold the CLI open
@@ -206,16 +209,23 @@ async function startServer(): Promise<ServerState> {
   throw new Error(`Server failed to start within ${MAX_START_WAIT / 1000}s`);
 }
 
-async function ensureServer(): Promise<ServerState> {
+async function ensureServer(profileName?: string): Promise<ServerState> {
   const state = readState();
 
   if (state && isProcessAlive(state.pid)) {
+    // Profile mismatch — kill and restart with the requested profile
+    if ((state.profile ?? undefined) !== (profileName ?? undefined)) {
+      console.error('[browse] Profile changed, restarting server...');
+      await killServer(state.pid);
+      return startServer(profileName);
+    }
+
     // Check for binary version mismatch (auto-restart on update)
     const currentVersion = readVersionHash();
     if (currentVersion && state.binaryVersion && currentVersion !== state.binaryVersion) {
       console.error('[browse] Binary updated, restarting server...');
       await killServer(state.pid);
-      return startServer();
+      return startServer(profileName);
     }
 
     // Server appears alive — do a health check
@@ -236,11 +246,11 @@ async function ensureServer(): Promise<ServerState> {
 
   // Need to (re)start
   console.error('[browse] Starting server...');
-  return startServer();
+  return startServer(profileName);
 }
 
 // ─── Command Dispatch ──────────────────────────────────────────
-async function sendCommand(state: ServerState, command: string, args: string[], retries = 0): Promise<void> {
+async function sendCommand(state: ServerState, command: string, args: string[], retries = 0, profileName?: string): Promise<void> {
   const body = JSON.stringify({ command, args });
 
   try {
@@ -289,8 +299,8 @@ async function sendCommand(state: ServerState, command: string, args: string[], 
     if (err.code === 'ECONNREFUSED' || err.code === 'ECONNRESET' || err.message?.includes('fetch failed')) {
       if (retries >= 1) throw new Error('[browse] Server crashed twice in a row — aborting');
       console.error('[browse] Server connection lost. Restarting...');
-      const newState = await startServer();
-      return sendCommand(newState, command, args, retries + 1);
+      const newState = await startServer(profileName);
+      return sendCommand(newState, command, args, retries + 1, profileName);
     }
     throw err;
   }
@@ -298,12 +308,22 @@ async function sendCommand(state: ServerState, command: string, args: string[], 
 
 // ─── Main ──────────────────────────────────────────────────────
 async function main() {
-  const args = process.argv.slice(2);
+  let args = process.argv.slice(2);
+
+  // Extract --profile <name> before parsing the command
+  let profileName: string | undefined;
+  const profileIdx = args.indexOf('--profile');
+  if (profileIdx !== -1 && profileIdx + 1 < args.length) {
+    profileName = args[profileIdx + 1];
+    args = [...args.slice(0, profileIdx), ...args.slice(profileIdx + 2)];
+  }
 
   if (args.length === 0 || args[0] === '--help' || args[0] === '-h') {
     console.log(`gstack browse — Fast headless browser for AI coding agents
 
-Usage: browse <command> [args...]
+Usage: browse [--profile <name>] <command> [args...]
+
+Options:        --profile <name>  Use persistent browser profile (cookies/storage survive restarts)
 
 Navigation:     goto <url> | back | forward | reload | url
 Content:        text | html [sel] | links | forms | accessibility
@@ -348,8 +368,8 @@ Refs:           After 'snapshot', use @e1, @e2... as selectors:
     commandArgs.push(stdin.trim());
   }
 
-  const state = await ensureServer();
-  await sendCommand(state, command, commandArgs);
+  const state = await ensureServer(profileName);
+  await sendCommand(state, command, commandArgs, 0, profileName);
 }
 
 if (import.meta.main) {

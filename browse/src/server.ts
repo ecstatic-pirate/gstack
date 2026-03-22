@@ -32,6 +32,7 @@ ensureStateDir(config);
 // ─── Auth ───────────────────────────────────────────────────────
 const AUTH_TOKEN = crypto.randomUUID();
 const BROWSE_PORT = parseInt(process.env.BROWSE_PORT || '0', 10);
+const BROWSE_PROFILE = process.env.BROWSE_PROFILE || undefined;
 const IDLE_TIMEOUT_MS = parseInt(process.env.BROWSE_IDLE_TIMEOUT || '1800000', 10); // 30 min
 
 function validateAuth(req: Request): boolean {
@@ -297,7 +298,7 @@ async function start() {
   const port = await findPort();
 
   // Launch browser
-  await browserManager.launch();
+  await browserManager.launch(BROWSE_PROFILE);
 
   const startTime = Date.now();
   const server = Bun.serve({
@@ -321,6 +322,7 @@ async function start() {
           uptime: Math.floor((Date.now() - startTime) / 1000),
           tabs: browserManager.getTabCount(),
           currentUrl: browserManager.getCurrentUrl(),
+          ...(BROWSE_PROFILE ? { profile: BROWSE_PROFILE } : {}),
         }), {
           status: 200,
           headers: { 'Content-Type': 'application/json' },
@@ -352,6 +354,7 @@ async function start() {
     startedAt: new Date().toISOString(),
     serverPath: path.resolve(import.meta.dir, 'server.ts'),
     binaryVersion: readVersionHash() || undefined,
+    ...(BROWSE_PROFILE ? { profile: BROWSE_PROFILE } : {}),
   };
   const tmpFile = config.stateFile + '.tmp';
   fs.writeFileSync(tmpFile, JSON.stringify(state, null, 2), { mode: 0o600 });

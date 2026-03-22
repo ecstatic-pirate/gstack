@@ -15,6 +15,9 @@
  *   restores state. Falls back to clean slate on any failure.
  */
 
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import { chromium, type Browser, type BrowserContext, type BrowserContextOptions, type Page, type Locator, type Cookie } from 'playwright';
 import { addConsoleEntry, addNetworkEntry, addDialogEntry, networkBuffer, type DialogEntry } from './buffers';
 import { validateNavigationUrl } from './url-validation';
@@ -42,6 +45,7 @@ export class BrowserManager {
   private nextTabId: number = 1;
   private extraHeaders: Record<string, string> = {};
   private customUserAgent: string | null = null;
+  private profilePath: string | null = null;
 
   /** Server port — set after server starts, used by cookie-import-browser command */
   public serverPort: number = 0;
@@ -61,37 +65,90 @@ export class BrowserManager {
   private isHeaded: boolean = false;
   private consecutiveFailures: number = 0;
 
-  async launch() {
-    this.browser = await chromium.launch({ headless: true });
+  async launch(profileName?: string) {
+    if (profileName) {
+      // Persistent context mode — cookies/localStorage survive server restarts
+      this.profilePath = profileName;
+      const profileDir = path.join(os.homedir(), '.gstack', 'profiles', profileName);
+      fs.mkdirSync(profileDir, { recursive: true });
 
-    // Chromium crash → exit with clear message
-    this.browser.on('disconnected', () => {
-      console.error('[browse] FATAL: Chromium process crashed or was killed. Server exiting.');
-      console.error('[browse] Console/network logs flushed to .gstack/browse-*.log');
-      process.exit(1);
-    });
+      this.context = await chromium.launchPersistentContext(profileDir, {
+        headless: true,
+        viewport: { width: 1280, height: 720 },
+        ...(this.customUserAgent ? { userAgent: this.customUserAgent } : {}),
+      });
 
-    const contextOptions: BrowserContextOptions = {
-      viewport: { width: 1280, height: 720 },
-    };
-    if (this.customUserAgent) {
-      contextOptions.userAgent = this.customUserAgent;
+      this.browser = this.context.browser();
+
+      if (this.browser) {
+        this.browser.on('disconnected', () => {
+          console.error('[browse] FATAL: Chromium process crashed or was killed. Server exiting.');
+          console.error('[browse] Console/network logs flushed to .gstack/browse-*.log');
+          process.exit(1);
+        });
+      } else {
+        // Fallback: watch context disconnect when browser() not available
+        this.context.on('close', () => {
+          console.error('[browse] FATAL: Browser context closed unexpectedly. Server exiting.');
+          process.exit(1);
+        });
+      }
+
+      if (Object.keys(this.extraHeaders).length > 0) {
+        await this.context.setExtraHTTPHeaders(this.extraHeaders);
+      }
+
+      // launchPersistentContext auto-creates one page — wire it up and register as first tab
+      const existingPages = this.context.pages();
+      const firstPage = existingPages[0] ?? await this.context.newPage();
+      const id = this.nextTabId++;
+      this.pages.set(id, firstPage);
+      this.activeTabId = id;
+      this.wirePageEvents(firstPage);
+    } else {
+      // Ephemeral mode (default)
+      this.browser = await chromium.launch({ headless: true });
+
+      this.browser.on('disconnected', () => {
+        console.error('[browse] FATAL: Chromium process crashed or was killed. Server exiting.');
+        console.error('[browse] Console/network logs flushed to .gstack/browse-*.log');
+        process.exit(1);
+      });
+
+      const contextOptions: BrowserContextOptions = {
+        viewport: { width: 1280, height: 720 },
+      };
+      if (this.customUserAgent) {
+        contextOptions.userAgent = this.customUserAgent;
+      }
+      this.context = await this.browser.newContext(contextOptions);
+
+      if (Object.keys(this.extraHeaders).length > 0) {
+        await this.context.setExtraHTTPHeaders(this.extraHeaders);
+      }
+
+      await this.newTab();
     }
-    this.context = await this.browser.newContext(contextOptions);
+  }
 
-    if (Object.keys(this.extraHeaders).length > 0) {
-      await this.context.setExtraHTTPHeaders(this.extraHeaders);
-    }
-
-    // Create first tab
-    await this.newTab();
+  isUsingProfile(): boolean {
+    return this.profilePath !== null;
   }
 
   async close() {
-    if (this.browser) {
-      // Remove disconnect handler to avoid exit during intentional close
+    if (this.profilePath) {
+      // Persistent context — close the context directly
+      if (this.context) {
+        this.context.removeAllListeners('close');
+        await Promise.race([
+          this.context.close(),
+          new Promise(resolve => setTimeout(resolve, 5000)),
+        ]).catch(() => {});
+        this.context = null;
+      }
+      this.browser = null;
+    } else if (this.browser) {
       this.browser.removeAllListeners('disconnected');
-      // Timeout: headed browser.close() can hang on macOS
       await Promise.race([
         this.browser.close(),
         new Promise(resolve => setTimeout(resolve, 5000)),
@@ -102,10 +159,16 @@ export class BrowserManager {
 
   /** Health check — verifies Chromium is connected AND responsive */
   async isHealthy(): Promise<boolean> {
-    if (!this.browser || !this.browser.isConnected()) return false;
+    if (this.profilePath) {
+      // Persistent context — check via the underlying browser if available, else context
+      if (!this.context) return false;
+      if (this.browser && !this.browser.isConnected()) return false;
+    } else {
+      if (!this.browser || !this.browser.isConnected()) return false;
+    }
     try {
       const page = this.pages.get(this.activeTabId);
-      if (!page) return true; // connected but no pages — still healthy
+      if (!page) return true;
       await Promise.race([
         page.evaluate('1'),
         new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 2000)),
@@ -384,6 +447,9 @@ export class BrowserManager {
    * Falls back to a clean slate on any failure.
    */
   async recreateContext(): Promise<string | null> {
+    if (this.profilePath) {
+      return 'Cannot recreate context in profile mode — restart server instead.';
+    }
     if (!this.browser || !this.context) {
       throw new Error('Browser not launched');
     }
