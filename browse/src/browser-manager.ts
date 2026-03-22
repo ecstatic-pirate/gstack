@@ -65,46 +65,55 @@ export class BrowserManager {
   private isHeaded: boolean = false;
   private consecutiveFailures: number = 0;
 
+  private getProfileDir(): string | null {
+    if (!this.profilePath) return null;
+    return path.join(os.homedir(), '.gstack', 'profiles', this.profilePath);
+  }
+
+  private getCookieFile(): string | null {
+    const dir = this.getProfileDir();
+    return dir ? path.join(dir, 'saved-cookies.json') : null;
+  }
+
   async launch(profileName?: string) {
     if (profileName) {
-      // Persistent context mode — cookies/localStorage survive server restarts
+      // Persistent context mode — cookies survive server restarts via saved-cookies.json
       this.profilePath = profileName;
-      const profileDir = path.join(os.homedir(), '.gstack', 'profiles', profileName);
+      const profileDir = this.getProfileDir()!;
       fs.mkdirSync(profileDir, { recursive: true });
 
-      this.context = await chromium.launchPersistentContext(profileDir, {
-        headless: true,
-        viewport: { width: 1280, height: 720 },
-        ...(this.customUserAgent ? { userAgent: this.customUserAgent } : {}),
+      this.browser = await chromium.launch({ headless: true });
+
+      this.browser.on('disconnected', () => {
+        console.error('[browse] FATAL: Chromium process crashed or was killed. Server exiting.');
+        console.error('[browse] Console/network logs flushed to .gstack/browse-*.log');
+        process.exit(1);
       });
 
-      this.browser = this.context.browser();
-
-      if (this.browser) {
-        this.browser.on('disconnected', () => {
-          console.error('[browse] FATAL: Chromium process crashed or was killed. Server exiting.');
-          console.error('[browse] Console/network logs flushed to .gstack/browse-*.log');
-          process.exit(1);
-        });
-      } else {
-        // Fallback: watch context disconnect when browser() not available
-        this.context.on('close', () => {
-          console.error('[browse] FATAL: Browser context closed unexpectedly. Server exiting.');
-          process.exit(1);
-        });
-      }
+      const contextOptions: BrowserContextOptions = {
+        viewport: { width: 1280, height: 720 },
+        ...(this.customUserAgent ? { userAgent: this.customUserAgent } : {}),
+      };
+      this.context = await this.browser.newContext(contextOptions);
 
       if (Object.keys(this.extraHeaders).length > 0) {
         await this.context.setExtraHTTPHeaders(this.extraHeaders);
       }
 
-      // launchPersistentContext auto-creates one page — wire it up and register as first tab
-      const existingPages = this.context.pages();
-      const firstPage = existingPages[0] ?? await this.context.newPage();
-      const id = this.nextTabId++;
-      this.pages.set(id, firstPage);
-      this.activeTabId = id;
-      this.wirePageEvents(firstPage);
+      // Restore saved cookies from previous session
+      const cookieFile = this.getCookieFile()!;
+      try {
+        const data = fs.readFileSync(cookieFile, 'utf-8');
+        const cookies = JSON.parse(data);
+        if (Array.isArray(cookies) && cookies.length > 0) {
+          await this.context.addCookies(cookies);
+          console.log(`[browse] Restored ${cookies.length} cookies from profile "${profileName}"`);
+        }
+      } catch {
+        // No saved cookies or parse error — start fresh
+      }
+
+      await this.newTab();
     } else {
       // Ephemeral mode (default)
       this.browser = await chromium.launch({ headless: true });
@@ -136,18 +145,19 @@ export class BrowserManager {
   }
 
   async close() {
-    if (this.profilePath) {
-      // Persistent context — close the context directly
-      if (this.context) {
-        this.context.removeAllListeners('close');
-        await Promise.race([
-          this.context.close(),
-          new Promise(resolve => setTimeout(resolve, 5000)),
-        ]).catch(() => {});
-        this.context = null;
+    // Save cookies to disk for profile mode before closing
+    if (this.profilePath && this.context) {
+      try {
+        const cookies = await this.context.cookies();
+        const cookieFile = this.getCookieFile()!;
+        fs.writeFileSync(cookieFile, JSON.stringify(cookies, null, 2));
+        console.log(`[browse] Saved ${cookies.length} cookies to profile "${this.profilePath}"`);
+      } catch (err) {
+        console.error(`[browse] Failed to save cookies: ${err}`);
       }
-      this.browser = null;
-    } else if (this.browser) {
+    }
+
+    if (this.browser) {
       this.browser.removeAllListeners('disconnected');
       await Promise.race([
         this.browser.close(),
@@ -159,13 +169,7 @@ export class BrowserManager {
 
   /** Health check — verifies Chromium is connected AND responsive */
   async isHealthy(): Promise<boolean> {
-    if (this.profilePath) {
-      // Persistent context — check via the underlying browser if available, else context
-      if (!this.context) return false;
-      if (this.browser && !this.browser.isConnected()) return false;
-    } else {
-      if (!this.browser || !this.browser.isConnected()) return false;
-    }
+    if (!this.browser || !this.browser.isConnected()) return false;
     try {
       const page = this.pages.get(this.activeTabId);
       if (!page) return true;
@@ -447,9 +451,6 @@ export class BrowserManager {
    * Falls back to a clean slate on any failure.
    */
   async recreateContext(): Promise<string | null> {
-    if (this.profilePath) {
-      return 'Cannot recreate context in profile mode — restart server instead.';
-    }
     if (!this.browser || !this.context) {
       throw new Error('Browser not launched');
     }

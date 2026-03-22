@@ -274,9 +274,14 @@ async function shutdown() {
   console.log('[browse] Shutting down...');
   clearInterval(flushInterval);
   clearInterval(idleCheckInterval);
-  await flushBuffers(); // Final flush (async now)
 
-  await browserManager.close();
+  try {
+    await flushBuffers();
+    await browserManager.close();
+    console.log('[browse] Browser closed cleanly');
+  } catch (err) {
+    console.error(`[browse] Error during shutdown: ${err}`);
+  }
 
   // Clean up state file
   try { fs.unlinkSync(config.stateFile); } catch {}
@@ -284,9 +289,15 @@ async function shutdown() {
   process.exit(0);
 }
 
-// Handle signals
-process.on('SIGTERM', shutdown);
-process.on('SIGINT', shutdown);
+// Handle signals — wrap async shutdown to keep event loop alive until done
+function handleSignal() {
+  shutdown().catch((err) => {
+    console.error(`[browse] Shutdown error: ${err}`);
+    process.exit(1);
+  });
+}
+process.on('SIGTERM', handleSignal);
+process.on('SIGINT', handleSignal);
 
 // ─── Start ─────────────────────────────────────────────────────
 async function start() {
