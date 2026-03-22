@@ -318,11 +318,14 @@ export async function handleWriteCommand(
         // Direct import mode — no UI
         const domain = args[domainIdx + 1];
         const browser = browserArg || 'comet';
-        const result = await importCookies(browser, [domain]);
+        // Support --browser-profile to specify which browser profile (e.g., "Profile 6")
+        const bpIdx = args.indexOf('--browser-profile');
+        const browserProfile = (bpIdx !== -1 && bpIdx + 1 < args.length) ? args[bpIdx + 1] : 'Default';
+        const result = await importCookies(browser, [domain], browserProfile);
         if (result.cookies.length > 0) {
           await page.context().addCookies(result.cookies);
         }
-        const msg = [`Imported ${result.count} cookies for ${domain} from ${browser}`];
+        const msg = [`Imported ${result.count} cookies for ${domain} from ${browser} (${browserProfile})`];
         if (result.failed > 0) msg.push(`(${result.failed} failed to decrypt)`);
         return msg.join(' ');
       }
@@ -333,7 +336,7 @@ export async function handleWriteCommand(
 
       const browsers = findInstalledBrowsers();
       if (browsers.length === 0) {
-        throw new Error('No Chromium browsers found. Supported: Comet, Chrome, Arc, Brave, Edge');
+        throw new Error('No Chromium browsers found. Supported: Comet, Dia, Chrome, Arc, Brave, Edge');
       }
 
       const pickerUrl = `http://127.0.0.1:${port}/cookie-picker`;

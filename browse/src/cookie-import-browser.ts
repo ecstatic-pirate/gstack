@@ -86,6 +86,7 @@ export class CookieImportError extends Error {
 
 const BROWSER_REGISTRY: BrowserInfo[] = [
   { name: 'Comet',  dataDir: 'Comet/',                       keychainService: 'Comet Safe Storage',          aliases: ['comet', 'perplexity'] },
+  { name: 'Dia',    dataDir: 'Dia/User Data/',                keychainService: 'Dia Safe Storage',            aliases: ['dia'] },
   { name: 'Chrome', dataDir: 'Google/Chrome/',                keychainService: 'Chrome Safe Storage',         aliases: ['chrome', 'google-chrome'] },
   { name: 'Arc',    dataDir: 'Arc/User Data/',                keychainService: 'Arc Safe Storage',            aliases: ['arc'] },
   { name: 'Brave',  dataDir: 'BraveSoftware/Brave-Browser/',  keychainService: 'Brave Safe Storage',          aliases: ['brave'] },
