@@ -209,12 +209,12 @@ async function startServer(profileName?: string): Promise<ServerState> {
   throw new Error(`Server failed to start within ${MAX_START_WAIT / 1000}s`);
 }
 
-async function ensureServer(profileName?: string): Promise<ServerState> {
+async function ensureServer(profileName?: string, skipProfileCheck?: boolean): Promise<ServerState> {
   const state = readState();
 
   if (state && isProcessAlive(state.pid)) {
     // Profile mismatch — kill and restart with the requested profile
-    if ((state.profile ?? undefined) !== (profileName ?? undefined)) {
+    if (!skipProfileCheck && (state.profile ?? undefined) !== (profileName ?? undefined)) {
       console.error('[browse] Profile changed, restarting server...');
       await killServer(state.pid);
       return startServer(profileName);
@@ -368,7 +368,12 @@ Refs:           After 'snapshot', use @e1, @e2... as selectors:
     commandArgs.push(stdin.trim());
   }
 
-  const state = await ensureServer(profileName);
+  // Server management commands talk to whatever server is running — no profile check
+  const serverMgmtCommands = new Set(['stop', 'restart', 'status']);
+  const effectiveProfile = serverMgmtCommands.has(command) ? undefined : profileName;
+  const skipProfileCheck = serverMgmtCommands.has(command);
+
+  const state = await ensureServer(effectiveProfile, skipProfileCheck);
   await sendCommand(state, command, commandArgs, 0, profileName);
 }
 
