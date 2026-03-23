@@ -134,8 +134,21 @@ export async function handleWriteCommand(
     }
 
     case 'type': {
-      const text = args.join(' ');
-      if (!text) throw new Error('Usage: browse type <text>');
+      let text: string;
+      if (args[0] && (args[0].startsWith('@e') || args[0].startsWith('@c'))) {
+        const [selector, ...textParts] = args;
+        text = textParts.join(' ');
+        if (!text) throw new Error('Usage: browse type <selector> <text>');
+        const resolved = await bm.resolveRef(selector);
+        if ('locator' in resolved) {
+          await resolved.locator.focus({ timeout: 5000 });
+        } else {
+          await page.focus(resolved.selector, { timeout: 5000 });
+        }
+      } else {
+        text = args.join(' ');
+        if (!text) throw new Error('Usage: browse type <text>');
+      }
       await page.keyboard.type(text);
       return `Typed ${text.length} characters`;
     }
